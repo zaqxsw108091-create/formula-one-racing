@@ -13,7 +13,11 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
     public float PeakTorque = 600.0f; // 피크 엔진 토크 (N·m) — 가속 세기 튜닝
     public AnimationCurve TorqueCurve; // RPM-토크 곡선 (비우면 기본 곡선 사용)
-    public float FinalDriveRatio = 3.5f; // 최종 감속비 (★ 0→100km/h 가속 시간 튜닝용: 클수록 빨라짐)
+    public float FinalDriveRatio = 1.2f; // 최종 감속비 (★ 0→100km/h 가속 시간 튜닝용: 클수록 빨라짐)
+
+    // 트랙션 컨트롤 — 구동 바퀴가 헛돌면 토크를 줄여 접지력을 회복
+    public bool TractionControl = true;
+    public float TractionSlipLimit = 0.35f; // 허용 슬립량 (작을수록 개입이 빠름)
     public float MaxEngineRPM = 10000.0f;
     public float MinEngineRPM = 1000.0f;
     public float RPMIncreaseRate = 500.0f; // RPM 증가 속도
@@ -27,10 +31,14 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     private AudioSource audioSource;
 
      
-    public float SteerAngle = 30.0f; // 최대 조향 각도
+    public float SteerAngle = 30.0f; // 저속에서의 최대 조향 각도
     public float MaxSpeed = 300.0f; // 최대 속도 (km/h)
 
-    // 드리프트 관련 변수
+    // 속도 감응 조향 — 빠를수록 조향각을 줄여 고속 안정성 확보
+    public float HighSpeedSteerAngle = 8.0f; // 고속에서의 조향 각도
+    public float SteerFalloffSpeed = 180.0f; // 이 속도(km/h)에서 조향각이 최소가 됨
+
+    // 드리프트 관련 변수 (뒷바퀴 그립만 낮춤 → 핸들은 살아있는 채로 미끄러짐)
     public float DriftGripMultiplier = 0.5f;
     public float NormalGripMultiplier = 1.0f;
     public float DriftHandbrakeForce = 5000.0f;
@@ -170,26 +178,29 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         // 바퀴 구동 — 바퀴 토크 = 엔진 토크 × 기어비 × 최종 감속비
         // (낮은 기어일수록 기어비가 커서 가속력↑, 높은 기어일수록 최고속↑)
         float torque = EngineTorque * GearRatio[CurrentGear] * FinalDriveRatio * Input.GetAxis("Vertical");
+        torque = ApplyTractionControl(torque); // 헛도는 만큼 토크를 깎아 접지력 확보
         FrontLeftWheel.motorTorque = torque;
         FrontRightWheel.motorTorque = torque;
         RearLeftWheel.motorTorque = torque;
         RearRightWheel.motorTorque = torque;
 
-        // 조향
+        // 조향 — 속도가 붙을수록 조향각을 줄여 고속에서 안정적으로
         float steerInput = Input.GetAxis("Horizontal");
-        FrontLeftWheel.steerAngle = SteerAngle * steerInput;
-        FrontRightWheel.steerAngle = SteerAngle * steerInput;
+        float speedFactor = Mathf.Clamp01(currentSpeed / SteerFalloffSpeed);
+        float effectiveSteerAngle = Mathf.Lerp(SteerAngle, HighSpeedSteerAngle, speedFactor);
+        FrontLeftWheel.steerAngle = effectiveSteerAngle * steerInput;
+        FrontRightWheel.steerAngle = effectiveSteerAngle * steerInput;
 
-        // 드리프트
+        // 드리프트 — 앞바퀴 그립은 그대로 두고 뒷바퀴만 낮춤 (핸들이 살아있는 채로 뒤가 미끄러짐)
         if (Input.GetKey(KeyCode.LeftShift))
         {
-            SetGrip(DriftGripMultiplier);
+            SetGrip(NormalGripMultiplier, DriftGripMultiplier);
             RearLeftWheel.brakeTorque = DriftHandbrakeForce;
             RearRightWheel.brakeTorque = DriftHandbrakeForce;
         }
         else
         {
-            SetGrip(NormalGripMultiplier);
+            SetGrip(NormalGripMultiplier, NormalGripMultiplier);
             RearLeftWheel.brakeTorque = 0;
             RearRightWheel.brakeTorque = 0;
         }
@@ -259,22 +270,45 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
     }
 
-    void SetGrip(float multiplier)
+    // 앞/뒤 그립을 따로 설정 (드리프트 시 뒤만 낮추기 위함)
+    void SetGrip(float frontMultiplier, float rearMultiplier)
     {
-        WheelFrictionCurve forwardFriction = FrontLeftWheel.forwardFriction;
-        WheelFrictionCurve sidewaysFriction = FrontLeftWheel.sidewaysFriction;
+        ApplyGrip(FrontLeftWheel, frontMultiplier);
+        ApplyGrip(FrontRightWheel, frontMultiplier);
+        ApplyGrip(RearLeftWheel, rearMultiplier);
+        ApplyGrip(RearRightWheel, rearMultiplier);
+    }
+
+    void ApplyGrip(WheelCollider wheel, float multiplier)
+    {
+        WheelFrictionCurve forwardFriction = wheel.forwardFriction;
+        WheelFrictionCurve sidewaysFriction = wheel.sidewaysFriction;
 
         forwardFriction.stiffness = multiplier;
         sidewaysFriction.stiffness = multiplier;
 
-        FrontLeftWheel.forwardFriction = forwardFriction;
-        FrontLeftWheel.sidewaysFriction = sidewaysFriction;
-        FrontRightWheel.forwardFriction = forwardFriction;
-        FrontRightWheel.sidewaysFriction = sidewaysFriction;
-        RearLeftWheel.forwardFriction = forwardFriction;
-        RearLeftWheel.sidewaysFriction = sidewaysFriction;
-        RearRightWheel.forwardFriction = forwardFriction;
-        RearRightWheel.sidewaysFriction = sidewaysFriction;
+        wheel.forwardFriction = forwardFriction;
+        wheel.sidewaysFriction = sidewaysFriction;
+    }
+
+    // 트랙션 컨트롤 — 바퀴가 헛도는 정도(슬립)를 보고 토크를 줄여 접지력을 회복
+    float ApplyTractionControl(float torque)
+    {
+        if (!TractionControl || Mathf.Approximately(torque, 0f)) return torque;
+
+        float maxSlip = 0f;
+        WheelHit hit;
+        if (FrontLeftWheel.GetGroundHit(out hit)) maxSlip = Mathf.Max(maxSlip, Mathf.Abs(hit.forwardSlip));
+        if (FrontRightWheel.GetGroundHit(out hit)) maxSlip = Mathf.Max(maxSlip, Mathf.Abs(hit.forwardSlip));
+        if (RearLeftWheel.GetGroundHit(out hit)) maxSlip = Mathf.Max(maxSlip, Mathf.Abs(hit.forwardSlip));
+        if (RearRightWheel.GetGroundHit(out hit)) maxSlip = Mathf.Max(maxSlip, Mathf.Abs(hit.forwardSlip));
+
+        if (maxSlip > TractionSlipLimit)
+        {
+            float excess = (maxSlip - TractionSlipLimit) / TractionSlipLimit;
+            torque *= Mathf.Clamp01(1f - excess); // 슬립이 클수록 토크를 크게 감소
+        }
+        return torque;
     }
     void OnGUI()
     {
