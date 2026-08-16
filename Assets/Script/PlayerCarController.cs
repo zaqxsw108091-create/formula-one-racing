@@ -13,7 +13,7 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
     public float PeakTorque = 600.0f; // 피크 엔진 토크 (N·m) — 가속 세기 튜닝
     public AnimationCurve TorqueCurve; // RPM-토크 곡선 (비우면 기본 곡선 사용)
-    public float FinalDriveRatio = 1.2f; // 최종 감속비 (★ 0→100km/h 가속 시간 튜닝용: 클수록 빨라짐)
+    public float FinalDriveRatio = 2.0f; // 최종 감속비 (★ 0→100km/h 가속 시간 튜닝용: 클수록 빨라짐)
 
     // 트랙션 컨트롤 — 구동 바퀴가 헛돌면 토크를 줄여 접지력을 회복
     public bool TractionControl = true;
@@ -46,13 +46,22 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     // 브레이크 관련 변수 
     public float BrakeForce = 10000.0f;
 
+    // 접지력 / 다운포스 — 고속 코너링 안정성
+    public float GripStiffness = 2.2f;        // 타이어 접지력 배수 (클수록 덜 미끄러짐)
+    public float DownforceCoefficient = 25.0f; // 속도에 비례해 차를 눌러주는 힘
+
+    // 감속 특성 — 최고속을 넘었을 때 뚝 끊기지 않고 서서히 줄도록
+    public float SpeedDecayRate = 25.0f;      // 초당 감속량(km/h)
+
     // 부스터 변수 (Left Ctrl)
     public float BoostForce = 12000.0f;       // 부스터 추진력
     public float BoostDuration = 3.0f;        // 최대 지속 시간(초)
     public float BoostRechargeRate = 0.5f;    // 미사용 시 초당 충전량
     public float BoostExtraSpeed = 60.0f;     // 부스터 중 최고속 추가 허용(km/h)
+    public float BoostFadeRate = 12.0f;       // 부스터 종료 후 추가속도가 사라지는 속도(km/h per sec)
     private float boostRemaining;             // 남은 부스터(초)
     private bool isBoosting = false;          // 부스터 사용 중 여부
+    private float boostSpeedBonus = 0.0f;     // 현재 적용 중인 부스터 추가 최고속 (서서히 감소)
 
     // 0→100km/h 가속 측정 (튜닝 보조)
     private float accelTimer = 0.0f;
@@ -65,7 +74,6 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     // 랩/순위 관련 (★ Waypoints에 AI와 동일한 트랙 웨이포인트를 순서대로 할당)
     public Transform[] Waypoints;            // 트랙 웨이포인트 (0번 ≈ 출발/결승선)
     public int TotalLaps = 5;                // 총 랩 수
-    public float WaypointThreshold = 25.0f;  // 웨이포인트 통과 인정 거리 (★ 트랙 크기에 맞게 조정)
     private LapTracker lapTracker;           // 랩/진행도 추적기
 
     public AudioClip driftSound; // 드리프트 소리
@@ -77,9 +85,15 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         audioSource = GetComponent<AudioSource>();
 
         rigidBody.centerOfMass = new Vector3(rigidBody.centerOfMass.x, -0.8f, rigidBody.centerOfMass.z);
+        // 고속에서 지형을 뚫고 빠지는 현상 방지 + 움직임 보간
+        rigidBody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        rigidBody.interpolation = RigidbodyInterpolation.Interpolate;
 
-        FrontLeftWheel.ConfigureVehicleSubsteps(5f, 10, 10);
-        RearLeftWheel.ConfigureVehicleSubsteps(5f, 10, 10);
+        // 모든 바퀴에 서브스텝 적용 (고속 물리 정확도)
+        FrontLeftWheel.ConfigureVehicleSubsteps(5f, 12, 12);
+        FrontRightWheel.ConfigureVehicleSubsteps(5f, 12, 12);
+        RearLeftWheel.ConfigureVehicleSubsteps(5f, 12, 12);
+        RearRightWheel.ConfigureVehicleSubsteps(5f, 12, 12);
 
         driftAudioSource = gameObject.AddComponent<AudioSource>();
         driftAudioSource.clip = driftSound;
@@ -89,13 +103,13 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         if (TorqueCurve == null || TorqueCurve.length == 0) TorqueCurve = EngineModel.DefaultTorqueCurve();
         // Waypoints를 직접 지정하지 않았으면 GameManager에서 공유 웨이포인트를 자동으로 가져옴
         Transform[] wp = (Waypoints != null && Waypoints.Length > 0) ? Waypoints : GameManager.Instance.GetWaypoints();
-        lapTracker = new LapTracker(wp, TotalLaps, WaypointThreshold);
+        lapTracker = new LapTracker(wp, TotalLaps);
         GameManager.Instance.AddCar(gameObject);
     }
 
     // IRaceCar 구현 (등수 계산용)
     public int CurrentLap => lapTracker != null ? lapTracker.CurrentLap : 0;
-    public float RaceProgress => lapTracker != null ? lapTracker.Progress(transform.position) : 0f;
+    public float RaceProgress => lapTracker != null ? lapTracker.TotalProgress : 0f;
     public bool Finished => lapTracker != null && lapTracker.Finished;
     public float FinishTime => lapTracker != null ? lapTracker.FinishTime : -1f;
 
@@ -113,6 +127,22 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         if (Input.GetKeyDown(KeyCode.Alpha5)) CurrentGear = 4;
         if (Input.GetKeyDown(KeyCode.Alpha6)) CurrentGear = 5;
         CurrentGear = Mathf.Clamp(CurrentGear, 0, GearRatio.Length - 1);
+
+        // 코스를 벗어나거나 뒤집혔을 때 트랙으로 복귀
+        if (Input.GetKeyDown(KeyCode.R)) RespawnOnTrack();
+    }
+
+    // 트랙 위(다음 웨이포인트)로 복귀 — 진행 방향을 보게 세운다
+    void RespawnOnTrack()
+    {
+        if (lapTracker == null || !lapTracker.HasWaypoints) return;
+
+        transform.position = lapTracker.GetRespawnPosition() + Vector3.up * 1.5f;
+        transform.rotation = lapTracker.GetRespawnRotation();
+        rigidBody.linearVelocity = Vector3.zero;
+        rigidBody.angularVelocity = Vector3.zero;
+        lapTracker.ResyncAfterTeleport(); // 순간이동을 결승선 통과로 오인하지 않도록
+        CurrentGear = 0;
     }
 
     void FixedUpdate()
@@ -125,15 +155,25 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
         // 속도 제한 (km/h)
         // 기어별 최고속: 기어비에 반비례 → 최고 기어가 MaxSpeed, 낮은 기어는 더 낮음.
-        // (더 빨리 가려면 업시프트 필요) + 부스터 중에는 BoostExtraSpeed 만큼 추가 허용
         float currentSpeed = rigidBody.linearVelocity.magnitude * 3.6f;
         float topGearRatio = GearRatio[GearRatio.Length - 1];
         float gearMaxSpeed = MaxSpeed * (topGearRatio / GearRatio[CurrentGear]);
-        float effectiveMaxSpeed = gearMaxSpeed + (isBoosting ? BoostExtraSpeed : 0f);
+
+        // 부스터 추가 최고속은 부스터가 끝나면 '서서히' 사라짐 (속도가 뚝 끊기지 않게)
+        if (isBoosting) boostSpeedBonus = BoostExtraSpeed;
+        else boostSpeedBonus = Mathf.MoveTowards(boostSpeedBonus, 0f, BoostFadeRate * Time.fixedDeltaTime);
+
+        float effectiveMaxSpeed = gearMaxSpeed + boostSpeedBonus;
         if (currentSpeed > effectiveMaxSpeed)
         {
-            rigidBody.linearVelocity = rigidBody.linearVelocity.normalized * (effectiveMaxSpeed / 3.6f);
+            // 즉시 잘라내지 않고 서서히 줄여 자연스럽게 감속
+            float newSpeed = Mathf.MoveTowards(currentSpeed, effectiveMaxSpeed, SpeedDecayRate * Time.fixedDeltaTime);
+            rigidBody.linearVelocity = rigidBody.linearVelocity.normalized * (newSpeed / 3.6f);
+            currentSpeed = newSpeed;
         }
+
+        // 다운포스 — 속도가 붙을수록 차를 아래로 눌러 접지력 확보 (고속 코너 안정)
+        rigidBody.AddForce(-transform.up * DownforceCoefficient * currentSpeed);
 
         // 0→100km/h 가속 시간 측정 (튜닝 보조)
         if (currentSpeed < 1.0f && Input.GetAxis("Vertical") > 0.1f && !accelMeasuring)
@@ -192,15 +232,16 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         FrontRightWheel.steerAngle = effectiveSteerAngle * steerInput;
 
         // 드리프트 — 앞바퀴 그립은 그대로 두고 뒷바퀴만 낮춤 (핸들이 살아있는 채로 뒤가 미끄러짐)
+        // GripStiffness를 곱해 평상시 접지력을 높임 → 코너에서 덜 미끄러짐
         if (Input.GetKey(KeyCode.LeftShift))
         {
-            SetGrip(NormalGripMultiplier, DriftGripMultiplier);
+            SetGrip(NormalGripMultiplier * GripStiffness, DriftGripMultiplier * GripStiffness);
             RearLeftWheel.brakeTorque = DriftHandbrakeForce;
             RearRightWheel.brakeTorque = DriftHandbrakeForce;
         }
         else
         {
-            SetGrip(NormalGripMultiplier, NormalGripMultiplier);
+            SetGrip(NormalGripMultiplier * GripStiffness, NormalGripMultiplier * GripStiffness);
             RearLeftWheel.brakeTorque = 0;
             RearRightWheel.brakeTorque = 0;
         }
@@ -326,61 +367,30 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     }
     void AntiRoll()
     {
+        AntiRollAxle(FrontLeftWheel, FrontRightWheel);
+        AntiRollAxle(RearLeftWheel, RearRightWheel);
+    }
+
+    // 한 차축의 좌우 서스펜션 압축 차이만큼 반대 방향 힘을 주어 차체 롤을 억제.
+    // 양쪽 바퀴가 모두 접지했을 때만 적용한다 — 한쪽이 떠 있을 때 적용하면
+    // 큰 힘이 한쪽으로 몰려 차가 지면으로 박히거나 튕겨나갈 수 있다.
+    void AntiRollAxle(WheelCollider left, WheelCollider right)
+    {
         WheelHit hit;
-        float travelL = 1.0f;
-        float travelR = 1.0f;
+        bool groundedL = left.GetGroundHit(out hit);
+        float travelL = groundedL
+            ? Mathf.Clamp01((-left.transform.InverseTransformPoint(hit.point).y - left.radius) / left.suspensionDistance)
+            : 1.0f;
 
-        // 앞 차축 안티롤
-        bool groundedL = FrontLeftWheel.GetGroundHit(out hit);
-        if (groundedL)
-        {
-            travelL = (-FrontLeftWheel.transform.InverseTransformPoint(hit.point).y - FrontLeftWheel.radius) / FrontLeftWheel.suspensionDistance;
-        }
+        bool groundedR = right.GetGroundHit(out hit);
+        float travelR = groundedR
+            ? Mathf.Clamp01((-right.transform.InverseTransformPoint(hit.point).y - right.radius) / right.suspensionDistance)
+            : 1.0f;
 
-        bool groundedR = FrontRightWheel.GetGroundHit(out hit);
-        if (groundedR)
-        {
-            travelR = (-FrontRightWheel.transform.InverseTransformPoint(hit.point).y - FrontRightWheel.radius) / FrontRightWheel.suspensionDistance;
-        }
+        if (!groundedL || !groundedR) return; // 한쪽이라도 떠 있으면 적용하지 않음
 
-        float antiRollForce = (travelL - travelR) * AntiRollForce;
-
-        if (groundedL)
-        {
-            rigidBody.AddForceAtPosition(FrontLeftWheel.transform.up * -antiRollForce, FrontLeftWheel.transform.position);
-        }
-
-        if (groundedR)
-        {
-            rigidBody.AddForceAtPosition(FrontRightWheel.transform.up * antiRollForce, FrontRightWheel.transform.position);
-        }
-
-        // 뒤 차축 안티롤
-        travelL = 1.0f;
-        travelR = 1.0f;
-
-        groundedL = RearLeftWheel.GetGroundHit(out hit);
-        if (groundedL)
-        {
-            travelL = (-RearLeftWheel.transform.InverseTransformPoint(hit.point).y - RearLeftWheel.radius) / RearLeftWheel.suspensionDistance;
-        }
-
-        groundedR = RearRightWheel.GetGroundHit(out hit);
-        if (groundedR)
-        {
-            travelR = (-RearRightWheel.transform.InverseTransformPoint(hit.point).y - RearRightWheel.radius) / RearRightWheel.suspensionDistance;
-        }
-
-        antiRollForce = (travelL - travelR) * AntiRollForce;
-
-        if (groundedL)
-        {
-            rigidBody.AddForceAtPosition(RearLeftWheel.transform.up * -antiRollForce, RearLeftWheel.transform.position);
-        }
-
-        if (groundedR)
-        {
-            rigidBody.AddForceAtPosition(RearRightWheel.transform.up * antiRollForce, RearRightWheel.transform.position);
-        }
+        float force = (travelL - travelR) * AntiRollForce;
+        rigidBody.AddForceAtPosition(left.transform.up * -force, left.transform.position);
+        rigidBody.AddForceAtPosition(right.transform.up * force, right.transform.position);
     }
 }

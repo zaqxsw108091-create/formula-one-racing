@@ -70,6 +70,16 @@ public class GameManager : MonoBehaviour
         return car != null ? car.GetComponent<IRaceCar>() : null;
     }
 
+    // 플레이어의 현재 진행도 (AI 러버밴딩용). 플레이어가 없으면 -1.
+    public float PlayerProgress
+    {
+        get
+        {
+            IRaceCar p = GetRaceCar(playerCar);
+            return p != null ? p.RaceProgress : -1f;
+        }
+    }
+
     // 공유 웨이포인트 반환 (우선순위):
     //   1) 인스펙터의 waypoints 필드  2) 씬의 WaypointPath  3) AI 차들의 targetPositions
     public Transform[] GetWaypoints()
