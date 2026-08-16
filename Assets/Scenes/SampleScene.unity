@@ -269,7 +269,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -297,7 +297,7 @@ MonoBehaviour:
   startPosition: {fileID: 1197083780}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
@@ -2613,7 +2613,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -2643,7 +2643,7 @@ MonoBehaviour:
   startPosition: {fileID: 2055556584}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
@@ -4664,7 +4664,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -4694,7 +4694,7 @@ MonoBehaviour:
   startPosition: {fileID: 1351718480}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
@@ -5069,7 +5069,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -5099,7 +5099,7 @@ MonoBehaviour:
   startPosition: {fileID: 272249639}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
@@ -5585,7 +5585,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -5615,7 +5615,7 @@ MonoBehaviour:
   startPosition: {fileID: 134470576}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
@@ -5808,7 +5808,7 @@ MonoBehaviour:
     m_PreInfinity: 2
     m_PostInfinity: 2
     m_RotationOrder: 4
-  FinalDriveRatio: 1
+  FinalDriveRatio: 2
   GripStiffness: 2.2
   DownforceCoefficient: 25
   SpeedDecayRate: 25
@@ -5838,7 +5838,7 @@ MonoBehaviour:
   startPosition: {fileID: 369931207}
   totalLaps: 5
   LaneSpread: 4
-  SpeedVariance: 0.08
+  SpeedVariance: 0.04
   CornerBrakeDistance: 40
   CornerMinSpeed: 40
   BrakeForcePerWheel: 3000
