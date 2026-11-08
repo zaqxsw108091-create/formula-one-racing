@@ -20,8 +20,16 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     public float TractionSlipLimit = 0.35f; // 허용 슬립량 (작을수록 개입이 빠름)
     public float MaxEngineRPM = 10000.0f;
     public float MinEngineRPM = 1000.0f;
-    public float RPMIncreaseRate = 500.0f; // RPM 증가 속도
-    public float RPMDecreaseRate = 1000.0f; // RPM 감소 속도
+    public float RPMIncreaseRate = 500.0f; // (이전 RPM 계산 방식에서 쓰던 값 — 현재 미사용)
+    public float RPMDecreaseRate = 1000.0f; // (이전 RPM 계산 방식에서 쓰던 값 — 현재 미사용)
+    public float RPMNeedleSpeed = 20000.0f; // RPM 바늘이 목표값을 따라가는 속도(초당 RPM)
+    public float ShiftHintRPM = 9000.0f;    // 이 RPM 이상이면 화면에 업시프트 안내 표시
+    // 회전수 제한기(레브 리미터) — 기어 최고속(=최고 RPM)에서 가속 중이면 엔진 힘을 짧게 끊었다 이었다 반복
+    public float LimiterCutTime = 0.05f;    // 끊김/연결이 바뀌는 간격(초)
+    public float LimiterBounceRPM = 400.0f; // 끊길 때 RPM 바늘이 떨어지는 폭
+    private bool limiterActive = false;     // 지금 리미터에 걸려 있는지
+    private bool limiterCut = false;        // 지금 엔진 힘이 끊긴 순간인지
+    private float limiterTimer = 0.0f;
 
 
     private float EngineRPM = 0.0f;
@@ -57,11 +65,10 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     public float BoostForce = 12000.0f;       // 부스터 추진력
     public float BoostDuration = 3.0f;        // 최대 지속 시간(초)
     public float BoostRechargeRate = 0.5f;    // 미사용 시 초당 충전량
-    public float BoostExtraSpeed = 60.0f;     // 부스터 중 최고속 추가 허용(km/h)
-    public float BoostFadeRate = 12.0f;       // 부스터 종료 후 추가속도가 사라지는 속도(km/h per sec)
+    public float BoostExtraSpeed = 60.0f;     // (이전 방식: 부스터로 기어 최고속을 넘게 하던 값 — 현재 미사용)
+    public float BoostFadeRate = 12.0f;       // (이전 방식에서 쓰던 값 — 현재 미사용)
     private float boostRemaining;             // 남은 부스터(초)
     private bool isBoosting = false;          // 부스터 사용 중 여부
-    private float boostSpeedBonus = 0.0f;     // 현재 적용 중인 부스터 추가 최고속 (서서히 감소)
 
     // 0→100km/h 가속 측정 (튜닝 보조)
     private float accelTimer = 0.0f;
@@ -75,6 +82,9 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
     public Transform[] Waypoints;            // 트랙 웨이포인트 (0번 ≈ 출발/결승선)
     public int TotalLaps = 5;                // 총 랩 수
     private LapTracker lapTracker;           // 랩/진행도 추적기
+
+    // 맵 밖으로 떨어졌을 때 자동 복귀 (이 높이 아래로 내려가면 트랙 위로 되돌림)
+    public float FallRespawnY = -50.0f;
 
     public AudioClip driftSound; // 드리프트 소리
     private AudioSource driftAudioSource; // 드리프트 소리 재생 컴포넌트
@@ -139,6 +149,9 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
         transform.position = lapTracker.GetRespawnPosition() + Vector3.up * 1.5f;
         transform.rotation = lapTracker.GetRespawnRotation();
+        // 물리 몸체도 같이 옮김 (보간(Interpolate) 중인 Rigidbody는 Transform만 바꾸면 덮어써질 수 있음)
+        rigidBody.position = transform.position;
+        rigidBody.rotation = transform.rotation;
         rigidBody.linearVelocity = Vector3.zero;
         rigidBody.angularVelocity = Vector3.zero;
         lapTracker.ResyncAfterTeleport(); // 순간이동을 결승선 통과로 오인하지 않도록
@@ -147,6 +160,13 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
 
     void FixedUpdate()
     {
+        // 도로 밖(바닥이 없는 곳)으로 떨어지면 자동으로 트랙에 복귀
+        if (transform.position.y < FallRespawnY)
+        {
+            RespawnOnTrack();
+            return;
+        }
+
         // 랩/진행도 갱신 (웨이포인트 순서 통과 → 한 바퀴 돌면 랩 +1)
         if (lapTracker != null)
         {
@@ -159,11 +179,9 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         float topGearRatio = GearRatio[GearRatio.Length - 1];
         float gearMaxSpeed = MaxSpeed * (topGearRatio / GearRatio[CurrentGear]);
 
-        // 부스터 추가 최고속은 부스터가 끝나면 '서서히' 사라짐 (속도가 뚝 끊기지 않게)
-        if (isBoosting) boostSpeedBonus = BoostExtraSpeed;
-        else boostSpeedBonus = Mathf.MoveTowards(boostSpeedBonus, 0f, BoostFadeRate * Time.fixedDeltaTime);
-
-        float effectiveMaxSpeed = gearMaxSpeed + boostSpeedBonus;
+        // 기어 최고속(최고 RPM)이 한계 — 실제 차처럼 엔진 회전 한계를 넘는 속도는 낼 수 없다.
+        // (부스터는 가속만 빠르게 하고, 이 한계를 넘게 하지는 않는다)
+        float effectiveMaxSpeed = gearMaxSpeed;
         if (currentSpeed > effectiveMaxSpeed)
         {
             // 즉시 잘라내지 않고 서서히 줄여 자연스럽게 감속
@@ -195,20 +213,27 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
             }
         }
 
-        // 엔진 RPM 계산
-        float averageWheelRPM = (FrontLeftWheel.rpm + FrontRightWheel.rpm + RearLeftWheel.rpm + RearRightWheel.rpm) / 4;
-        EngineRPM = averageWheelRPM * GearRatio[CurrentGear];
+        // 엔진 RPM — 현재 기어의 최고속 대비 속도로 계산.
+        // 기어 안에서 속도가 오르면 RPM이 최저 → 레드존(최고)까지 올라가고, 기어를 올리면 RPM이 뚝 떨어진다.
+        // (예전 방식은 바퀴 회전수 × 기어비라서 실제로는 항상 최저 RPM에 붙어 있었다 → 엔진 힘·소리가 기어와 무관했음)
+        float targetRPM = Mathf.Lerp(MinEngineRPM, MaxEngineRPM, Mathf.Clamp01(currentSpeed / Mathf.Max(1f, gearMaxSpeed)));
+        EngineRPM = Mathf.MoveTowards(Mathf.Max(EngineRPM, MinEngineRPM), targetRPM, RPMNeedleSpeed * Time.fixedDeltaTime);
+        EngineRPM = Mathf.Clamp(EngineRPM, MinEngineRPM, MaxEngineRPM);
 
-        // 엔진 RPM 증가/감소
-        if (Input.GetAxis("Vertical") > 0)
+        // 회전수 제한기: 최고 RPM에서 가속 키를 누르고 있으면 엔진 힘이 짧게 끊겼다 이어지고,
+        // RPM 바늘과 엔진음이 떨린다 → "지금 기어를 올려야 한다"가 숫자와 소리로 느껴짐
+        limiterActive = Input.GetAxis("Vertical") > 0.1f && currentSpeed >= gearMaxSpeed * 0.995f;
+        if (limiterActive)
         {
-            EngineRPM += RPMIncreaseRate * Time.deltaTime;
+            limiterTimer += Time.fixedDeltaTime;
+            if (limiterTimer >= LimiterCutTime) { limiterTimer = 0f; limiterCut = !limiterCut; }
+            EngineRPM = limiterCut ? MaxEngineRPM - LimiterBounceRPM : MaxEngineRPM;
         }
         else
         {
-            EngineRPM -= RPMDecreaseRate * Time.deltaTime;
+            limiterCut = false;
+            limiterTimer = 0f;
         }
-        EngineRPM = Mathf.Clamp(EngineRPM, MinEngineRPM, MaxEngineRPM);
 
         // 엔진 토크 계산 (실제 RPM-토크 곡선 반영: 중회전 피크, 저/고회전 하락)
         EngineTorque = EngineModel.Torque(TorqueCurve, PeakTorque, EngineRPM, MinEngineRPM, MaxEngineRPM);
@@ -219,6 +244,7 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         // (낮은 기어일수록 기어비가 커서 가속력↑, 높은 기어일수록 최고속↑)
         float torque = EngineTorque * GearRatio[CurrentGear] * FinalDriveRatio * Input.GetAxis("Vertical");
         torque = ApplyTractionControl(torque); // 헛도는 만큼 토크를 깎아 접지력 확보
+        if (limiterCut) torque = 0f;           // 리미터가 엔진 힘을 끊은 순간
         FrontLeftWheel.motorTorque = torque;
         FrontRightWheel.motorTorque = torque;
         RearLeftWheel.motorTorque = torque;
@@ -259,12 +285,15 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         {
             FrontLeftWheel.brakeTorque = 0;
             FrontRightWheel.brakeTorque = 0;
-            RearLeftWheel.brakeTorque = 0;
-            RearRightWheel.brakeTorque = 0;
+            // 드리프트(Left Shift) 중이면 위에서 건 뒷바퀴 핸드브레이크를 유지
+            float rearBrake = Input.GetKey(KeyCode.LeftShift) ? DriftHandbrakeForce : 0f;
+            RearLeftWheel.brakeTorque = rearBrake;
+            RearRightWheel.brakeTorque = rearBrake;
         }
 
-        // 부스터 (Left Ctrl) — 강력한 전방 추진, 사용 시 소모 / 미사용 시 충전
-        isBoosting = Input.GetKey(KeyCode.LeftControl) && boostRemaining > 0f;
+        // 부스터 (Left Ctrl) — 가속을 강하게 해 주는 추진력, 사용 시 소모 / 미사용 시 충전
+        // 기어 최고속(최고 RPM)에 닿으면 더 밀어 주지 않음 (실제 F1의 ERS처럼 가속만 도움)
+        isBoosting = Input.GetKey(KeyCode.LeftControl) && boostRemaining > 0f && currentSpeed < gearMaxSpeed * 0.995f;
         if (isBoosting)
         {
             rigidBody.AddForce(transform.forward * BoostForce);
@@ -357,13 +386,19 @@ public class PlayerCarController : MonoBehaviour, IRaceCar
         // 실시간 플레이어 차량 시스템
         float currentSpeed = rigidBody.linearVelocity.magnitude * 3.6f;
         GUI.Label(new Rect(10, 10, 200, 20), "Speed: " + currentSpeed.ToString("F1") + " km/h");
+        string shiftHint = "";
+        if (limiterActive) shiftHint = CurrentGear < GearRatio.Length - 1 ? "   LIMITER - SHIFT UP (E)" : "   LIMITER (top speed)";
+        else if (EngineRPM >= ShiftHintRPM && CurrentGear < GearRatio.Length - 1) shiftHint = "   SHIFT UP (E)";
+        GUI.Label(new Rect(10, 30, 300, 20), "RPM: " + EngineRPM.ToString("F0") + " / " + MaxEngineRPM.ToString("F0") + shiftHint);
         float gearMaxSpeed = MaxSpeed * (GearRatio[GearRatio.Length - 1] / GearRatio[CurrentGear]);
         GUI.Label(new Rect(10, 90, 250, 20), "Gear: " + (CurrentGear + 1) + " (max " + gearMaxSpeed.ToString("F0") + "km/h, E/Q·1~6)");
         GUI.Label(new Rect(10, 110, 220, 20), "Boost: " + (boostRemaining / BoostDuration * 100f).ToString("F0") + "%  (Left Ctrl)");
-        if (last0to100 > 0f)
-        {
-            GUI.Label(new Rect(10, 130, 220, 20), "0→100: " + last0to100.ToString("F2") + " s");
-        }
+        // 0→100km/h 기록: 멈춘 상태에서 가속 키를 떼지 않고 100km/h에 도달하면 기록됨
+        string accelText;
+        if (accelMeasuring) accelText = "0→100: measuring " + accelTimer.ToString("F1") + " s";
+        else if (last0to100 > 0f) accelText = "0→100: " + last0to100.ToString("F2") + " s";
+        else accelText = "0→100: stop, then hold accelerate";
+        GUI.Label(new Rect(10, 130, 320, 20), accelText);
     }
     void AntiRoll()
     {

@@ -25,15 +25,18 @@ public class GameManager : MonoBehaviour
 
     private void Awake()
     {
-        if (Instance == null)
-        {
-            Instance = this;
-            DontDestroyOnLoad(gameObject);
-        }
-        else
+        // 씬마다 하나만 사용 (씬을 다시 불러오면 새 GameManager가 시간·순위를 처음부터 관리)
+        if (Instance != null && Instance != this)
         {
             Destroy(gameObject);
+            return;
         }
+        Instance = this;
+    }
+
+    private void OnDestroy()
+    {
+        if (Instance == this) Instance = null;
     }
 
     void Start()
@@ -53,6 +56,12 @@ public class GameManager : MonoBehaviour
         if (Input.GetKeyDown(KeyCode.Escape))
         {
             TogglePause();
+        }
+
+        // 레이스가 끝난 뒤 Enter로 다시 시작
+        if (currentState == GameState.Finished && Input.GetKeyDown(KeyCode.Return))
+        {
+            RestartGame();
         }
     }
 
@@ -182,6 +191,7 @@ public class GameManager : MonoBehaviour
         else if (currentState == GameState.Finished)
         {
             GUI.Label(new Rect(Screen.width / 2 - 100, Screen.height / 2 - 120, 220, 20), "=== Final Ranking ===");
+            GUI.Label(new Rect(Screen.width / 2 - 100, Screen.height / 2 - 100 + finalRanking.Count * 20 + 10, 320, 20), "Press Enter to restart");
             for (int i = 0; i < finalRanking.Count; i++)
             {
                 IRaceCar rc = GetRaceCar(finalRanking[i]);

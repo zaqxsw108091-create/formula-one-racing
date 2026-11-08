@@ -25,6 +25,9 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
     public float StuckTimeLimit = 3.0f;        // 이만큼 멈춰 있으면 트랙으로 복귀
     public float MaxPathDistance = 60.0f;      // 경로에서 이만큼 벗어나면 복귀
     public float StartGracePeriod = 5.0f;      // 출발 직후 이 시간 동안은 끼임 판정 안 함
+    public float FallRespawnY = -50.0f;        // 이 높이 아래로 떨어지면 즉시 트랙으로 복귀
+    public float FlippedUpY = 0.5f;            // 차체 윗방향(up.y)이 이보다 작으면 뒤집힌 것으로 보고 끼임과 같이 복구
+    public float CenterOfMassBelowWheels = 0.92f; // 무게중심을 바퀴 높이보다 이만큼 아래에 둠 (차 모델마다 바퀴 높이가 달라서)
     private float stuckTimer = 0.0f;
     private float aliveTime = 0.0f;
 
@@ -68,13 +71,19 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
     private float speedMultiplier = 1f; // 이 차의 최고속 배수
 
     // 코너 감속
-    public float CornerBrakeDistance = 40.0f; // 이 거리 안에 들어오면 다가오는 코너에 맞춰 감속 시작
+    public float CornerBrakeDistance = 40.0f; // (이전 코너 계산 방식에서 쓰던 값 — 현재 미사용)
+    public float CornerLookAhead = 250.0f;    // 앞으로 이 거리(m)까지 경로를 내다보며 코너를 찾음
+    public float CornerBrakeDecel = 7.0f;     // 코너 전에 감속할 때 가정하는 감속도(m/s²)
+    public float CornerGrip = 1.0f;           // 코너에서 버틸 수 있는 옆 방향 가속도(g). 코너 속도 = √(접지력 × g × 곡선 반지름)
+    public float SteerLookAheadMin = 25.0f;   // 조향 목표점까지 최소 거리(m)
+    public float SteerLookAheadTime = 0.8f;   // 조향 목표점 = 이 시간(초) 동안 달릴 거리만큼 앞
     public float CornerMinSpeed = 40.0f;       // 급코너 최소 통과 속도 (km/h)
     public float BrakeForcePerWheel = 3000.0f; // 감속 시 바퀴당 브레이크 토크
     public float SteerSensitivity = 45.0f;     // 이 각도(도) 이상 벗어나면 풀 스티어
 
     // 충돌 회피
-    public float AvoidDistance = 12.0f; // 전방 차량 감지 거리
+    public float AvoidDistance = 12.0f; // 전방 차량 감지 최소 거리
+    public float AvoidLookAheadTime = 1.0f; // 전방 감지 거리 = 이 시간(초) 동안 달릴 거리 (빠를수록 멀리 봄)
     public float AvoidRadius = 2.0f;    // 감지 반경
 
     public float NormalGripMultiplier = 1.0f; // 기본 접지 배수 (GripStiffness와 곱해져 적용)
@@ -85,7 +94,14 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
         rigidBody = GetComponent<Rigidbody>();
         audioSource = GetComponent<AudioSource>();
 
-        rigidBody.centerOfMass = new Vector3(rigidBody.centerOfMass.x, -0.8f, rigidBody.centerOfMass.z);
+        // 무게중심은 바퀴 높이 기준으로 정함. 씬의 AI 차는 두 가지 모델이 섞여 있어
+        // 고정값(-0.8)을 쓰면 바퀴가 낮은 모델은 무게중심이 너무 높아 잘 넘어진다.
+        // (바퀴 높이 +0.12인 모델은 계산 결과가 기존과 같은 -0.8)
+        float wheelY = (transform.InverseTransformPoint(FrontLeftWheel.transform.position).y
+                      + transform.InverseTransformPoint(FrontRightWheel.transform.position).y
+                      + transform.InverseTransformPoint(RearLeftWheel.transform.position).y
+                      + transform.InverseTransformPoint(RearRightWheel.transform.position).y) / 4f;
+        rigidBody.centerOfMass = new Vector3(rigidBody.centerOfMass.x, wheelY - CenterOfMassBelowWheels, rigidBody.centerOfMass.z);
         // 고속에서 지형을 뚫고 빠지는 현상 방지 + 움직임 보간
         rigidBody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
         rigidBody.interpolation = RigidbodyInterpolation.Interpolate;
@@ -137,7 +153,18 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
         rigidBody.AddForce(-transform.up * DownforceCoefficient * currentSpeed);
 
         // ===== 조향: 목표 웨이포인트(차선 오프셋 적용) 방향 =====
-        Vector3 targetPos = lapTracker.CurrentTarget.position;
+        // 바로 다음 점이 아니라 속도에 맞춰 조금 앞의 점을 보고 조향 (촘촘한 경로에서 지그재그 방지)
+        float lookAhead = Mathf.Max(SteerLookAheadMin, currentSpeed / 3.6f * SteerLookAheadTime);
+        Transform aim = lapTracker.CurrentTarget;
+        for (int k = 0; k < 16; k++)
+        {
+            Transform w = lapTracker.GetUpcomingWaypoint(k);
+            if (w == null) break;
+            aim = w;
+            Vector3 d = w.position - transform.position; d.y = 0f;
+            if (d.magnitude >= lookAhead) break;
+        }
+        Vector3 targetPos = aim.position;
         Vector3 toTarget = targetPos - transform.position;
         Vector3 lateral = Vector3.Cross(Vector3.up, toTarget).normalized;
         targetPos += lateral * laneOffset;
@@ -160,9 +187,6 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
         FrontRightWheel.steerAngle = effectiveSteerAngle * steerInput;
 
         // ===== RPM / 자동 변속 / 기어별 최고속 =====
-        float averageWheelRPM = (FrontLeftWheel.rpm + FrontRightWheel.rpm + RearLeftWheel.rpm + RearRightWheel.rpm) / 4;
-        EngineRPM = averageWheelRPM * GearRatio[CurrentGear];
-
         // 러버밴딩: 플레이어보다 앞서면 살짝 느리게, 뒤처지면 살짝 빠르게 → 항상 붙어서 달리는 레이스
         float carMaxSpeed = MaxSpeed * speedMultiplier * GetRubberBandFactor();
         float topGearRatio = GearRatio[GearRatio.Length - 1];
@@ -178,8 +202,9 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
             if (currentSpeed < lowerGearMax * 0.7f) CurrentGear--; // 너무 느려지면 다운시프트
         }
 
-        EngineRPM = Mathf.Clamp(EngineRPM, MinEngineRPM, MaxEngineRPM);
         gearMaxSpeed = carMaxSpeed * (topGearRatio / GearRatio[CurrentGear]);
+        // 엔진 RPM — 현재 기어의 최고속 대비 속도 (플레이어와 같은 방식)
+        EngineRPM = Mathf.Lerp(MinEngineRPM, MaxEngineRPM, Mathf.Clamp01(currentSpeed / Mathf.Max(1f, gearMaxSpeed)));
         if (currentSpeed > gearMaxSpeed)
         {
             // 즉시 잘라내지 않고 서서히 줄여 자연스럽게 감속
@@ -243,13 +268,15 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
     // 복구했으면 true를 반환해 이번 프레임의 주행 처리를 건너뛴다.
     bool CheckStuckAndRecover(float currentSpeed)
     {
-        // 출발 직후에는 정지 상태가 정상이므로 판정하지 않음
+        // 출발 직후에는 정지 상태가 정상이므로 판정하지 않음 (단, 맵 밖으로 떨어진 경우는 즉시 복구)
         aliveTime += Time.fixedDeltaTime;
-        if (aliveTime < StartGracePeriod) return false;
+        bool fell = transform.position.y < FallRespawnY;
+        if (aliveTime < StartGracePeriod && !fell) return false;
 
         bool tooFarOff = lapTracker.DistanceFromPath > MaxPathDistance;
+        bool flipped = transform.up.y < FlippedUpY; // 옆으로 눕거나 뒤집힘
 
-        if (currentSpeed < StuckSpeedThreshold || tooFarOff)
+        if (currentSpeed < StuckSpeedThreshold || tooFarOff || flipped)
         {
             stuckTimer += Time.fixedDeltaTime;
         }
@@ -258,11 +285,14 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
             stuckTimer = 0f;
         }
 
-        if (stuckTimer < StuckTimeLimit) return false;
+        if (stuckTimer < StuckTimeLimit && !fell) return false;
 
         // 다음 웨이포인트 위치로, 진행 방향을 보게 복귀 (살짝 띄워서 지면에 박히지 않게)
         transform.position = lapTracker.GetRespawnPosition() + Vector3.up * 1.5f;
         transform.rotation = lapTracker.GetRespawnRotation();
+        // 물리 몸체도 같이 옮김 (보간(Interpolate) 중인 Rigidbody는 Transform만 바꾸면 덮어써질 수 있음)
+        rigidBody.position = transform.position;
+        rigidBody.rotation = transform.rotation;
         rigidBody.linearVelocity = Vector3.zero;
         rigidBody.angularVelocity = Vector3.zero;
         lapTracker.ResyncAfterTeleport(); // 순간이동을 결승선 통과로 오인하지 않도록
@@ -285,25 +315,42 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
         return 1f - t * RubberBandStrength;
     }
 
-    // 다가오는 코너의 꺾임 각도·거리를 보고 통과 가능 속도(km/h)를 계산
+    // 앞으로 CornerLookAhead(m)까지 경로를 따라가며 곡선 반지름을 재고, 타이어가 버틸 수 있는 코너 속도
+    // √(CornerGrip × 9.81 × 반지름)과 그 지점까지 남은 거리(CornerBrakeDecel로 감속)를 따져
+    // 지금 낼 수 있는 속도(km/h)를 계산한다.
+    // 예전 방식은 바로 다음 점 하나만 보고, 차가 차선 옆으로 비켜 있으면 직선에서도 큰 코너로 착각해 계속 감속했다.
     float GetCornerSpeedLimit(float carMaxSpeed)
     {
-        Transform t0 = lapTracker.CurrentTarget;
-        Transform t1 = lapTracker.GetUpcomingWaypoint(1);
-        if (t0 == null || t1 == null) return carMaxSpeed;
+        Transform a = lapTracker.GetUpcomingWaypoint(0);
+        if (a == null) return carMaxSpeed;
 
-        Vector3 inDir = t0.position - transform.position;
-        Vector3 outDir = t1.position - t0.position;
-        inDir.y = 0f; outDir.y = 0f;
+        Vector3 toA = a.position - transform.position; toA.y = 0f;
+        float dist = toA.magnitude;
+        float limit = carMaxSpeed;
+        Vector3 prev = a.position;
+        for (int k = 1; k < 64 && dist < CornerLookAhead; k++)
+        {
+            Transform w = lapTracker.GetUpcomingWaypoint(k);
+            if (w == null) break;
+            Vector3 step = w.position - prev; step.y = 0f;
+            dist += step.magnitude;
+            prev = w.position;
 
-        float cornerAngle = Vector3.Angle(inDir, outDir); // 0=직선, 클수록 급코너
-        float sharpness = Mathf.Clamp01(cornerAngle / 90f);
-        float cornerSpeed = Mathf.Lerp(carMaxSpeed, CornerMinSpeed, sharpness);
-
-        // 코너에서 멀면 제한 완화, CornerBrakeDistance 안에서 점점 cornerSpeed로
-        float distToCorner = inDir.magnitude;
-        float approach = Mathf.Clamp01(distToCorner / CornerBrakeDistance); // 0(코너)~1(멀리)
-        return Mathf.Lerp(cornerSpeed, carMaxSpeed, approach);
+            // 이 지점 앞뒤 두 칸씩으로 곡선 반지름을 잼 (점 하나의 작은 흔들림에 반응하지 않도록)
+            Transform back = lapTracker.GetUpcomingWaypoint(k - 1 >= 0 ? k - 1 : 0);
+            Transform ahead = lapTracker.GetUpcomingWaypoint(k + 2);
+            if (back == null || ahead == null) continue;
+            Vector3 v1 = w.position - back.position; v1.y = 0f;
+            Vector3 v2 = ahead.position - w.position; v2.y = 0f;
+            float turnRad = Vector3.Angle(v1, v2) * Mathf.Deg2Rad;
+            if (turnRad < 0.001f) continue; // 직선
+            float radius = (v1.magnitude + v2.magnitude) * 0.5f / turnRad;
+            float vCorner = Mathf.Sqrt(CornerGrip * 9.81f * radius);                  // m/s
+            vCorner = Mathf.Clamp(vCorner, CornerMinSpeed / 3.6f, carMaxSpeed / 3.6f);
+            float allowed = Mathf.Sqrt(vCorner * vCorner + 2f * CornerBrakeDecel * dist) * 3.6f;
+            limit = Mathf.Min(limit, allowed);
+        }
+        return limit;
     }
 
     // 전방 차량 감지 → 회피 조향(avoidSteer)과 속도 제한(speedLimit) 산출
@@ -313,9 +360,11 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
         speedLimit = Mathf.Infinity;
 
         Vector3 origin = transform.position + transform.up * 0.5f;
-        RaycastHit[] hits = Physics.SphereCastAll(origin, AvoidRadius, transform.forward, AvoidDistance);
+        // 고속에서는 12m가 순식간이라, 속도에 비례해 더 멀리 본다
+        float detectDistance = Mathf.Max(AvoidDistance, currentSpeed / 3.6f * AvoidLookAheadTime);
+        RaycastHit[] hits = Physics.SphereCastAll(origin, AvoidRadius, transform.forward, detectDistance);
 
-        float nearest = AvoidDistance;
+        float nearest = detectDistance;
         Transform aheadCar = null;
         foreach (RaycastHit h in hits)
         {
@@ -330,8 +379,12 @@ public class ComputerCarController : MonoBehaviour, IRaceCar
 
         if (aheadCar == null) return;
 
-        float factor = Mathf.Clamp01(nearest / AvoidDistance); // 0(코앞)~1(멀리)
-        speedLimit = Mathf.Lerp(CornerMinSpeed, currentSpeed, factor); // 가까울수록 강하게 감속
+        float factor = Mathf.Clamp01(nearest / detectDistance); // 0(코앞)~1(멀리)
+        // 앞차 속도에 맞춰 따라가되, 거리가 있으면 조금 더 빨리 다가갈 수 있게 (추월은 회피 조향으로)
+        // 예전에는 '내 현재 속도'를 상한으로 써서, 줄지어 달리면 서로 점점 느려지고 다시 가속하지 못했다.
+        Rigidbody aheadBody = aheadCar.GetComponentInParent<Rigidbody>();
+        float aheadSpeed = aheadBody != null ? aheadBody.linearVelocity.magnitude * 3.6f : currentSpeed;
+        speedLimit = Mathf.Max(20f, Mathf.Lerp(aheadSpeed * 0.9f, aheadSpeed + 40f, factor));
         // 앞차가 오른쪽이면 왼쪽으로(반대), 가까울수록 크게 회피
         float side = Vector3.Dot(transform.right, aheadCar.position - transform.position);
         avoidSteer = (side > 0f ? -1f : 1f) * (1f - factor);
